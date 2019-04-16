@@ -4,7 +4,8 @@
 
 #include <mxnet/base.h>
 
-#define TILE_WIDTH 16
+#define TILE_SIZE 16
+#define CU_MAX_THREAD 1024
 
 namespace mxnet
 {
@@ -23,8 +24,8 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     int b, m, h, w, c, p, q;
     b = blockIdx.x;
     m = blockIdx.y;
-    h = blockIdx.z/W_grid*TILE_WIDTH + threadIdx.y;
-    w = blockIdx.z%W_grid*TILE_WIDTH + threadIdx.x;
+    h = blockIdx.z/W_grid*TILE_SIZE + threadIdx.y;
+    w = blockIdx.z%W_grid*TILE_SIZE + threadIdx.x;
     float acc = 0.0f;
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
@@ -49,6 +50,75 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 #undef k4d
 }
 
+__global__ void __gemm(float* A, float* B, float* C, int numARows, int numAColumns, int numBRows, int numBColumns, int numCRows, int numCColumns) {
+    __shared__ float subTileM[TILE_SIZE][TILE_SIZE];
+    __shared__ float subTileN[TILE_SIZE][TILE_SIZE];
+    int bx = blockIdx.x; int by = blockIdx.y;
+    int tx = threadIdx.x; int ty = threadIdx.y;
+    int Row = by*TILE_SIZE + ty;
+    int Col = bx*TILE_SIZE + tx;
+    float Pvalue = 0.0f;
+
+    for (int m = 0; m < ceil((float) numAColumns/TILE_SIZE); m++) {
+        if (Row < numCRows && m*TILE_SIZE + tx < numAColumns)
+            subTileM[ty][tx] = A[Row*numAColumns+m*TILE_SIZE+tx];
+        else
+            subTileM[ty][tx] = 0.0f;
+        if (Col < numCColumns && m*TILE_SIZE + ty < numBRows)
+            subTileN[ty][tx] = B[(m*TILE_SIZE + ty)*numBColumns+Col];
+        else
+            subTileN[ty][tx] = 0.0f;
+
+        __syncthreads();
+        for (int k = 0; k < TILE_SIZE; k++)
+            Pvalue += subTileM[ty][k]*subTileN[k][tx];
+        __syncthreads();
+    }
+
+    if (Row < numCRows && Col < numCColumns)
+        C[Row*numCColumns+Col] = Pvalue;
+}
+
+
+__global__ void __unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
+    int t = blockIdx.x*CU_MAX_THREAD + threadIdx.x;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int W_unroll = H_out*W_out;
+    if (t < C*W_unroll) {
+        int c = t/W_unroll;
+        int s = t%W_unroll;
+        int h_out = s/W_out;
+        int w_out = s%W_out;
+        int w_unroll = h_out*W_out + w_out;
+        int w_base = c*K*K;
+
+        for (int p = 0; p < K; p++) {
+            for (int q = 0; q < K; q++) {
+                int h_unroll = w_base + p*K + q;
+                X_unroll[h_unroll*W_unroll + w_unroll] = X[c*H*W + (h_out + p)*W + w_out + q];
+            }
+        }
+    }
+}
+
+
+void gemm(float* A, float* B, float* C, int numARows, int numAColumns, int numBRows, int numBColumns, int numCRows, int numCColumns) {
+    dim3 dimGrid(ceil((float) numCColumns/TILE_SIZE), ceil((float) numCRows/TILE_SIZE), 1);
+    dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1);
+    __gemm<<<dimGrid, dimBlock>>>(A, B, C, numARows, numAColumns, numBRows, numBColumns, numCRows, numCColumns);
+}
+
+
+void unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int num_threads = C*H_out*W_out;
+    const int num_blocks = ceil(num_threads/CU_MAX_THREAD);
+    __unroll<<<num_blocks, CU_MAX_THREAD>>>(C, H, W, K, X, X_unroll);
+}
+
+
 /*
    This function is called by new-inl.h
    Any code you write should be executed by this function.
@@ -65,14 +135,19 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int K = w.shape_[3]; // kernel_size
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
+    const int W_unroll = C*K*K;
+    const int H_unroll = H_out*W_out;
+    float* X_unrolled;
+    cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
 
-    // Set the kernel dimensions
-    const int H_grid = ceil(float(H_out)/TILE_WIDTH);
-    const int W_grid =ceil(float(W_out)/TILE_WIDTH);
-    const int Z = H_grid*W_grid;
-    dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 gridDim(B, M, Z);
-    forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
+    #pragma unroll
+    for (int b = 0; b < B; b++) {
+        float* x_dptr = &x.dptr_[b*C*H*W];
+        unroll(C, H, W, K, x_dptr, X_unrolled);
+        float* y_dptr = &y.dptr_[b*M*H_unroll];
+        gemm(w.dptr_, X_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
+    }
+    cudaFree(X_unrolled);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
@@ -91,6 +166,6 @@ void forward(mshadow::Tensor<gpu, 4, DType> &y, const mshadow::Tensor<gpu, 4, DT
 }
 }
 
-#undef TILE_WIDTH
+#undef TILE_SIZE
 
 #endif
