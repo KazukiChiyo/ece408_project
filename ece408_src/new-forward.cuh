@@ -120,7 +120,7 @@ void unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
 
 
 /* shared memory */
-__global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  const int C, const int K, const int W_grid)
+__global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  const int H, const int W, const int C, const int K, const int W_grid)
 {
 
 	    int b, m, h, w, h_base, w_base, tx, ty;
@@ -133,7 +133,9 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 			h = h_base + ty;
 			w = w_base + tx;
 			int X_tile_width = TILE_WIDTH + K - 1; // input shared data for each b and c
-																							
+			const int H_out = H - K + 1;
+			const int W_out = W - K + 1;
+
 			extern __shared__ float shmem[];
 			float * X_shared = &shmem[0];
 			k_start = X_tile_width * X_tile_width;
@@ -154,7 +156,8 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 				if ( tx < K && ty < K) 
 					k2d(ty, tx) = k4d(m, c, ty, tx); 
 				__syncthreads();
-
+				
+				// thread block size should be TILF_WIDTH * TILE_WIDTH, and the data may be reload here, 
 				for (int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH)
 				{
 					for (int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH)
@@ -172,14 +175,91 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 					}	
 				}
 				__syncthreads();
-			}																																																					
-			y4d(b, m, h, w) = acc;
+			}
+			// TODO the control divergency, how to bypass __syncthreads that is inside the brackets
+			if ( h < H_out && w < W_out )
+				y4d(b, m, h, w) = acc;`
+		
 #undef k2d_shmem
 #undef x2d_shmem
 #undef y4d
 #undef x4d
 #undef k4d
 }
+
+/* reduction tree  prototype */ 
+__global__ void forward_kernel_reduction_tree(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
+{
+
+    int b, m, h, w, c, p, q, tx;
+    b = blockIdx.x;
+    m = blockIdx.y;
+    h_base = blockIdx.z/W_grid*TILE_WIDTH;
+    w_base = blockIdx.z%W_grid*TILE_WIDTH;
+
+    float acc = 0.0f;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;		
+		tx = threadIdx.x;
+
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define shmem(i2, i1, i0) ... // TODO
+
+		extern __shared__ float shmem[C][TILE_WIDTH][TILE_WIDTH]; // temp declaration
+		int stride = blockDim.x / 2;
+		
+		for (int dh = 0; dh < TILE_WIDTH; ++dh)
+		{
+			for (int dw = 0; dw < TILE_WIDTH; ++dw)
+			{
+				if (h_base + dh < H_out && w_base + dw < W_out)
+				{
+					float acc = 0.0f;
+          for (p = 0; p < K; ++p) {
+            for (q = 0; q < K; ++q) {
+              acc += x4d(b, c, h + p, w + q)*k4d(m, tx, p, q);
+            }
+          }
+          shmem[tx, h, w] = acc;
+				}
+			}
+		}
+
+		for (int std = stride/2; std > 0; std /= 2)
+		{
+			if (tx < std)
+			{
+				float sum = 0.0f; 
+				for (int p = 0; p < TILE_WIDTH; ++p)
+				{
+					for (int q = 0; q < TILE_WIDTH; ++q)
+					{
+						shmem[tx, p, q] += shmem[tx+std, p, q];  // TODO shmem macro taking 3 inputs 
+					}
+				}
+			}
+			__syncthreads();
+			
+		}
+
+    if (tx == 0) {
+			for (int ho = 0; ho < TILE_WIDTH; ++ho)
+			{
+				for (int wo = 0; wo < TILE_WIDTH; ++wo)
+				{
+    			y4d(b, w, ho + h_base, wo + w_base) = shmem[tx, ho + h_base, wo + w_base];
+				}
+			}
+    }
+
+#undef shmem 
+#undef y4d
+#undef x4d
+#undef k4d
+}
+
 
 
 /*
@@ -212,16 +292,32 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     }
     cudaFree(X_unrolled);
 
-		/*  shared memory optimization */                                                           
-		/*     
-		size_t shmem_size = sizeof(float)  * (TILE_WIDTH + K - 1) * (TILE_WIDTH + K -1 );
-		forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, C, K, W_grid);
-		*/
+/*  shared memory optimization */
+/*
+const H_grid = ceil((float)H_out / TILE_WIDTH);
+const W_grid = ceil((float) W_out / TILE_WIDTH);
+const Z =  H_grid * W_grid;
+
+dim3 gridDim(B, M, Z);
+dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
+size_t shmem_size = sizeof(float)  * (TILE_WIDTH + K - 1) * (TILE_WIDTH + K -1 );
+forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, C, K, W_grid);
+*/
+
+
+/* reduction tree optimization, invocation prototype */ 
+/*
+dim3 blockDim(C, 1, 1); // each block has all channel of input image
+dim3 gridDim(B, M, Z); // 
+forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
+*/
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 
 }
+
+
 
 
 
