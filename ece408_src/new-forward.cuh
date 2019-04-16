@@ -119,6 +119,69 @@ void unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
 }
 
 
+/* shared memory */
+__global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  const int C, const int K, const int W_grid)
+{
+
+	    int b, m, h, w, h_base, w_base, tx, ty;
+			b = blockIdx.x;
+			m = blockIdx.y;
+			tx = threadIdx.x;
+			ty = threadIdx,y;
+			h_base = blockIdx.z/W_grid*TILE_WIDTH;
+			w_base = blockIdx.z%W_grid*TILE_WIDTH;
+			h = h_base + ty;
+			w = w_base + tx;
+			int X_tile_width = TILE_WIDTH + K - 1; // input shared data for each b and c
+																							
+			extern __shared__ float shmem[];
+			float * X_shared = &shmem[0];
+			k_start = X_tile_width * X_tile_width;
+			float * K_shared = &shmem[k_start];
+
+			float acc = 0.0f;
+
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+
+#define k2d_shmem(i1, i0) (shmem[k_start * k_start + i1 * X_tile_width + i0])
+#define x2d_shmem(i1, i0) (shmem[i1 * X_tile_width + i0])
+
+			int c, j, k, p, q;
+			for ( c = 0; c < C; ++c)
+			{
+				if ( tx < K && ty < K) 
+					k2d(ty, tx) = k4d(m, c, ty, tx); 
+				__syncthreads();
+
+				for (int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH)
+				{
+					for (int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH)
+					{																																																											
+						x2d(i-h_base, j-w_base) = x4d(b, c, h, w);
+					}																																																			
+				}																																																										
+				__syncthreads();
+
+				for (p = 0; p < K; ++p)
+				{																																																				
+					for (q = 0; q < K; ++q)
+					{																																																													
+						acc+=x2d(h+p, w+q) * k2d(p, q);
+					}	
+				}
+				__syncthreads();
+			}																																																					
+			y4d(b, m, h, w) = acc;
+#undef k2d_shmem
+#undef x2d_shmem
+#undef y4d
+#undef x4d
+#undef k4d
+}
+
+
 /*
    This function is called by new-inl.h
    Any code you write should be executed by this function.
@@ -149,10 +212,19 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     }
     cudaFree(X_unrolled);
 
+		/*  shared memory optimization */                                                           
+		/*     
+		size_t shmem_size = sizeof(float)  * (TILE_WIDTH + K - 1) * (TILE_WIDTH + K -1 );
+		forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, C, K, W_grid);
+		*/
+
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 
 }
+
+
+
 
 /*
     This tells mxnet how to do an op when it's not a float.
