@@ -128,8 +128,8 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
     m = blockIdx.y;
     unsigned int tx = threadIdx.x;
     unsigned int ty = threadIdx.y;
-    h_base = blockIdx.z/W_grid*TILE_SIZE;
-    w_base = blockIdx.z%W_grid*TILE_SIZE;
+    h_base = (blockIdx.z/W_grid)*TILE_SIZE;
+    w_base = (blockIdx.z%W_grid)*TILE_SIZE;
     h = h_base + ty;
     w = w_base + tx;
     int X_tile_width = TILE_SIZE + K - 1; // input shared data for each b and c
@@ -147,8 +147,8 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
-#define k2d_shmem(i1, i0) (shmem[k_start + i1 * K + i0])
-#define x2d_shmem(i1, i0) (shmem[i1 * X_tile_width + i0])
+#define k2d_shmem(i1, i0) (shmem[k_start + (i1) * K + (i0)])
+#define x2d_shmem(i1, i0) (shmem[(i1) * X_tile_width + (i0)])
 
     int c, i, j, p, q;
     for ( c = 0; c < C; ++c)
@@ -157,7 +157,7 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
         if ( tx < K && ty < K)
             k2d_shmem(ty, tx) = k4d(m, c, ty, tx);
 				__syncthreads();
-
+      
 				// thread block size should be TILF_WIDTH * TILE_SIZE, and the data may be reload here,
 		    if ( h < H_out && w < W_out )
         {
@@ -165,25 +165,25 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
           {
             for (j = w; j < w_base + X_tile_width; j+=TILE_SIZE)
             {
-              x2d_shmem(i-h_base, j-w_base) = x4d(b, c, h, w);
+              x2d_shmem(i-h_base, j-w_base) = x4d(b, c, i, j);
             }
           }
         }
 				__syncthreads();
   
-
+/*
 		    if ( h < H_out && w < W_out )
         {
           for (p = 0; p < K; ++p)
           {
             for (q = 0; q < K; ++q)
             {
-              acc += x2d_shmem(h+p, w+q) * k2d_shmem(p, q);
+              acc += x2d_shmem(ty+p, tx+q) * k2d_shmem(p, q);
             }
           }
         }
 				__syncthreads();
-
+*/
     }
 
 		// TODO the control divergency, how to bypass __syncthreads that is inside the brackets
@@ -315,8 +315,8 @@ const int Z =  H_grid * W_grid;
 
 dim3 gridDim(B, M, Z);
 dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
-size_t shmem_size = sizeof(float)  * (TILE_SIZE + K - 1) * (TILE_SIZE + K -1 );
-forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, C, M, K, W_grid);
+size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
+forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
 
 
 
