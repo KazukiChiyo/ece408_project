@@ -123,63 +123,63 @@ void unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
 __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  const int H, const int W, const int C, const int K, const int W_grid)
 {
 
-	    int b, m, h, w, h_base, w_base, tx, ty;
-			b = blockIdx.x;
-			m = blockIdx.y;
-			tx = threadIdx.x;
-			ty = threadIdx,y;
-			h_base = blockIdx.z/W_grid*TILE_WIDTH;
-			w_base = blockIdx.z%W_grid*TILE_WIDTH;
-			h = h_base + ty;
-			w = w_base + tx;
-			int X_tile_width = TILE_WIDTH + K - 1; // input shared data for each b and c
-			const int H_out = H - K + 1;
-			const int W_out = W - K + 1;
+    int b, m, h, w, h_base, w_base, tx, ty;
+    b = blockIdx.x;
+    m = blockIdx.y;
+    tx = threadIdx.x;
+    ty = threadIdx,y;
+    h_base = blockIdx.z/W_grid*TILE_WIDTH;
+    w_base = blockIdx.z%W_grid*TILE_WIDTH;
+    h = h_base + ty;
+    w = w_base + tx;
+    int X_tile_width = TILE_WIDTH + K - 1; // input shared data for each b and c
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
 
-			extern __shared__ float shmem[];
-			float * X_shared = &shmem[0];
-			k_start = X_tile_width * X_tile_width;
-			float * K_shared = &shmem[k_start];
+    extern __shared__ float shmem[];
+    float * X_shared = &shmem[0];
+    k_start = X_tile_width * X_tile_width;
+    float * K_shared = &shmem[k_start];
 
-			float acc = 0.0f;
+    float acc = 0.0f;
 
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
 #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
-#define k2d_shmem(i1, i0) (shmem[k_start * k_start + i1 * X_tile_width + i0])
+#define k2d_shmem(i1, i0) (shmem[k_start + i1 * K + i0])
 #define x2d_shmem(i1, i0) (shmem[i1 * X_tile_width + i0])
 
-			int c, j, k, p, q;
-			for ( c = 0; c < C; ++c)
-			{
-				if ( tx < K && ty < K) 
-					k2d(ty, tx) = k4d(m, c, ty, tx); 
+    int c, j, k, p, q;
+    for ( c = 0; c < C; ++c)
+    {
+        if ( tx < K && ty < K)
+            k2d_shmem(ty, tx) = k4d(m, c, ty, tx);
 				__syncthreads();
-				
-				// thread block size should be TILF_WIDTH * TILE_WIDTH, and the data may be reload here, 
+
+				// thread block size should be TILF_WIDTH * TILE_WIDTH, and the data may be reload here,
 				for (int i = h; i < h_base + X_tile_width; i+=TILE_WIDTH)
 				{
-					for (int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH)
-					{																																																											
-						x2d(i-h_base, j-w_base) = x4d(b, c, h, w);
-					}																																																			
-				}																																																										
+          for (int j = w; j < w_base + X_tile_width; j+=TILE_WIDTH)
+					{
+						x2d_shmem(i-h_base, j-w_base) = x4d(b, c, h, w);
+					}
+				}
 				__syncthreads();
 
 				for (p = 0; p < K; ++p)
-				{																																																				
+				{
 					for (q = 0; q < K; ++q)
-					{																																																													
-						acc+=x2d(h+p, w+q) * k2d(p, q);
-					}	
+					{
+						acc += x2d_shmem(h+p, w+q) * k2d_shmem(p, q);
+					}
 				}
 				__syncthreads();
-			}
-			// TODO the control divergency, how to bypass __syncthreads that is inside the brackets
-			if ( h < H_out && w < W_out )
-				y4d(b, m, h, w) = acc;`
-		
+    }
+		// TODO the control divergency, how to bypass __syncthreads that is inside the brackets
+		if ( h < H_out && w < W_out )
+			y4d(b, m, h, w) = acc;
+
 #undef k2d_shmem
 #undef x2d_shmem
 #undef y4d
@@ -187,7 +187,7 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 #undef k4d
 }
 
-/* reduction tree  prototype */ 
+/* reduction tree  prototype */
 __global__ void forward_kernel_reduction_tree(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
 
@@ -199,7 +199,7 @@ __global__ void forward_kernel_reduction_tree(float *y, const float *x, const fl
 
     float acc = 0.0f;
     const int H_out = H - K + 1;
-    const int W_out = W - K + 1;		
+    const int W_out = W - K + 1;
 		tx = threadIdx.x;
 
 #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
@@ -209,7 +209,7 @@ __global__ void forward_kernel_reduction_tree(float *y, const float *x, const fl
 
 		extern __shared__ float shmem[C][TILE_WIDTH][TILE_WIDTH]; // temp declaration
 		int stride = blockDim.x / 2;
-		
+
 		for (int dh = 0; dh < TILE_WIDTH; ++dh)
 		{
 			for (int dw = 0; dw < TILE_WIDTH; ++dw)
@@ -231,17 +231,17 @@ __global__ void forward_kernel_reduction_tree(float *y, const float *x, const fl
 		{
 			if (tx < std)
 			{
-				float sum = 0.0f; 
+				float sum = 0.0f;
 				for (int p = 0; p < TILE_WIDTH; ++p)
 				{
 					for (int q = 0; q < TILE_WIDTH; ++q)
 					{
-						shmem[tx, p, q] += shmem[tx+std, p, q];  // TODO shmem macro taking 3 inputs 
+						shmem[tx, p, q] += shmem[tx+std, p, q];  // TODO shmem macro taking 3 inputs
 					}
 				}
 			}
 			__syncthreads();
-			
+
 		}
 
     if (tx == 0) {
@@ -254,7 +254,7 @@ __global__ void forward_kernel_reduction_tree(float *y, const float *x, const fl
 			}
     }
 
-#undef shmem 
+#undef shmem
 #undef y4d
 #undef x4d
 #undef k4d
@@ -305,10 +305,10 @@ forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr
 */
 
 
-/* reduction tree optimization, invocation prototype */ 
+/* reduction tree optimization, invocation prototype */
 /*
 dim3 blockDim(C, 1, 1); // each block has all channel of input image
-dim3 gridDim(B, M, Z); // 
+dim3 gridDim(B, M, Z); //
 forward_kernel<<<gridDim, blockDim>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
 */
 
