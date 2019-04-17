@@ -11,7 +11,7 @@
 #define FAKE_K (5)
 #define FAKE_M (10)
 #define FAKE_C (20)
-#define TOTAL_KERNEL_SIZE (FAKE_M * FAKE_K * FAKE_K * FAKE_C) 
+#define TOTAL_KERNEL_SIZE (FAKE_M * FAKE_K * FAKE_K * FAKE_C)
 
 namespace mxnet
 {
@@ -173,16 +173,16 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
       }
 			__syncthreads();
 
-	    for (p = 0, pp = h0; p < K * K; p += K, pp += 1) {
+	  for (p = 0; p < K; p++) {
         for (q = 0; q < K; q++) {
           // acc += x2d_shmem(w0+p, h0+q) * k2d_shmem(p, q);
-          acc += X_shared[pp*X_tile_width+w0+q] * K_shared[p+q];
+          acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * K_shared[p*K + q];
         }
       }
 			__syncthreads();
 
     }
-
+    if (h < H_out && w < W_out)
 		y4d(n, m, h, w) = acc;
 
 // #undef k2d_shmem
@@ -368,7 +368,7 @@ forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C
     // copy to contant memory
 /*
     int TRUE_KERNEL_SIZE = K * K * M * C;
-     
+
     cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
     forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
 */
