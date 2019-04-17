@@ -7,10 +7,18 @@
 #define TILE_SIZE 16
 #define CU_MAX_THREAD 1024
 
+/* kernel buffer elelment size */
+#define FAKE_K (5)
+#define FAKE_M (10)
+#define FAKE_C (20)
+#define TOTAL_KERNEL_SIZE (FAKE_M * FAKE_K * FAKE_K * FAKE_C) 
+
 namespace mxnet
 {
 namespace op
 {
+
+__constant__ float cons_mem[TOTAL_KERNEL_SIZE];
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
@@ -256,6 +264,47 @@ __global__ void forward_kernel_reduction_tree(float *y, const float *x, const fl
 
 */
 
+/* constant memory optimization */
+__global__ void forward_kernel_consmem(float *y, const float *x, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
+{
+
+    /*
+    Modify this function to implement the forward pass described in Chapter 16.
+    We have added an additional dimension to the tensors to support an entire mini-batch
+    The goal here is to be correct AND fast.
+    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
+    */
+    int b, m, h, w, c, p, q;
+    b = blockIdx.x;
+    m = blockIdx.y;
+    h = blockIdx.z/W_grid*TILE_SIZE + threadIdx.y;
+    w = blockIdx.z%W_grid*TILE_SIZE + threadIdx.x;
+    float acc = 0.0f;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d_constant(i3, i2, i1, i0) cons_mem[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+
+    if (h < H_out && w < W_out) {
+        for (c = 0; c < C; ++c) {
+            for (p = 0; p < K; ++p) {
+                for (q = 0; q < K; ++q) {
+                    acc += x4d(b, c, h + p, w + q) * k4d_constant(m, c, p, q);
+                }
+            }
+        }
+        y4d(b, m, h, w) = acc;
+    }
+
+#undef y4d
+#undef x4d
+#undef k4d_constant
+}
+
+
+
 /*
    This function is called by new-inl.h
    Any code you write should be executed by this function.
@@ -299,6 +348,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
     // forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
 
+
 /* reduction tree optimization, invocation prototype */
 /*
 dim3 blockDim(C, 1, 1); // each block has all channel of input image
@@ -306,6 +356,17 @@ dim3 gridDim(B, M, Z); //
 size_t shmem_size = sizeof(float) * TILE_WIDTH * TILE_WIDTH * CU_MAX_THREAD;
 forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
 */
+
+
+/* constant memory optimization */
+    // copy to contant memory
+/*
+    int TRUE_KERNEL_SIZE = K * K * M * C;
+
+    cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
+    forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
+*/
+
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
