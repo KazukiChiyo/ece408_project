@@ -7,6 +7,12 @@
 #define TILE_SIZE 16
 #define CU_MAX_THREAD 1024
 
+/* kernel buffer elelment size */
+#define FAKE_K (5)
+#define FAKE_M (10)
+#define FAKE_C (20)
+#define TOTAL_KERNEL_SIZE (FAKE_M * FAKE_K * FAKE_K * FAKE_C) 
+
 namespace mxnet
 {
 namespace op
@@ -342,10 +348,12 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int W_grid = ceil((float) W_out / TILE_SIZE);
     const int Z =  H_grid * W_grid;
 
+
     dim3 gridDim(B, M, Z);
     dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
     size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
     forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
+
 
 /* reduction tree optimization, invocation prototype */
 /*
@@ -355,9 +363,10 @@ size_t shmem_size = sizeof(float) * TILE_WIDTH * TILE_WIDTH * CU_MAX_THREAD;
 forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K,W_grid);
 */
 
+
 /* constant memory optimization */
-/*
     // copy to contant memory
+/*
     int TRUE_KERNEL_SIZE = K * K * M * C;
      
     cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
