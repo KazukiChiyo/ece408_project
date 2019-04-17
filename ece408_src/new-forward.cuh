@@ -81,22 +81,21 @@ __global__ void __gemm(float* A, float* B, float* C, int numARows, int numAColum
 
 
 __global__ void __unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
-    int t = blockIdx.x*CU_MAX_THREAD + threadIdx.x;
+    int t = blockIdx.x * CU_MAX_THREAD + threadIdx.x;
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     const int W_unroll = H_out*W_out;
     if (t < C*W_unroll) {
-        int c = t/W_unroll;
-        int s = t%W_unroll;
-        int h_out = s/W_out;
-        int w_out = s%W_out;
-        int w_unroll = h_out*W_out + w_out;
-        int w_base = c*K*K;
+        int c = t / W_unroll;
+        int s = t % W_unroll;
+        int h_out = s / W_out;
+        int w_out = s % W_out;
+        int w_base = c * K * K;
 
         for (int p = 0; p < K; p++) {
             for (int q = 0; q < K; q++) {
-                int h_unroll = w_base + p*K + q;
-                X_unroll[h_unroll*W_unroll + w_unroll] = X[c*H*W + (h_out + p)*W + w_out + q];
+                int h_unroll = w_base + p * K + q;
+                X_unroll[h_unroll*W_unroll + s] = X[c*H*W + (h_out + p)*W + w_out + q];
             }
         }
     }
@@ -114,74 +113,70 @@ void unroll(int C, int H, int W, int K, float* X, float* X_unroll) {
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
     const int num_threads = C*H_out*W_out;
-    const int num_blocks = ceil(num_threads/CU_MAX_THREAD);
-    __unroll<<<num_blocks, CU_MAX_THREAD>>>(C, H, W, K, X, X_unroll);
+    const int num_blocks = ceil(num_threads/ (CU_MAX_THREAD*1.0));
+    dim3 dimGrid(num_blocks, 1, 1);
+    dim3 dimBlock(CU_MAX_THREAD, 1, 1);
+    __unroll<<<dimGrid, dimBlock>>>(C, H, W, K, X, X_unroll);
 }
 
 
 /* shared memory */
 __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  const int H, const int W, const int M, const int C, const int K, const int W_grid)
 {
-    #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-    #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-    // #define k2d_shmem(i1, i0) (shmem[k_start + (i1) * K + (i0)])
-    // #define x2d_shmem(i1, i0) (shmem[(i1) * X_tile_width + (i0)])
+  #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+  #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+  #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
-    const int H_out = H - K + 1;
-    const int W_out = W - K + 1;
+  const int H_out = H - K + 1;
+  const int W_out = W - K + 1;
 
-    int n, m, h0, w0, h_base, w_base, h, w;
-    int X_tile_width = TILE_SIZE + K - 1;
+  int n, m, h0, w0, h_base, w_base, h, w;
+  int X_tile_width = TILE_SIZE + K - 1;
 
-    extern __shared__ float shmem[];
-    float * X_shared = &shmem[0];
-    int k_start = X_tile_width * X_tile_width;
-    float * K_shared = &shmem[k_start];
+  extern __shared__ float shmem[];
+  float * X_shared = &shmem[0];
+  int k_start = X_tile_width * X_tile_width;
+  float * K_shared = &shmem[k_start];
 
-    n = blockIdx.x;
-    m = blockIdx.y;
-    h0 = threadIdx.x;
-    w0 = threadIdx.y;
-    h_base = blockIdx.z / W_grid * TILE_SIZE;
-    w_base = blockIdx.z % W_grid * TILE_SIZE;
-    h = h_base + h0;
-    w = w_base + w0;
+  n = blockIdx.x;
+  m = blockIdx.y;
+  h0 = threadIdx.x;
+  w0 = threadIdx.y;
+  h_base = blockIdx.z / W_grid * TILE_SIZE;
+  w_base = blockIdx.z % W_grid * TILE_SIZE;
+  h = h_base + h0;
+  w = w_base + w0;
 
-    float acc = 0.0f;
+  float acc = 0.0f;
 
-    int c, i, ii, j, p, pp, q;
-    for (c = 0; c < C; c++) {
-      if (h0 < K && w0 < K)
-          K_shared[h0*K+w0] = k4d(m, c, h0, w0);
-			__syncthreads();
+  int c, i, ii, j, p, pp, q;
+  for (c = 0; c < C; c++) {
+    if (h0 < K && w0 < K)
+        K_shared[h0*K+w0] = k4d(m, c, h0, w0);
+		__syncthreads();
 
-			// thread block size should be TILF_WIDTH * TILE_SIZE, and the data may be reload here,
-	    for (i = h, ii = h0; i < h_base + X_tile_width; i += TILE_SIZE, ii += TILE_SIZE) {
-        for (j = w; j < w_base + X_tile_width; j += TILE_SIZE) {
-          // x2d_shmem(i-h_base, j-w_base) = x4d(b, c, i, j);
-          X_shared[ii*X_tile_width+j-w_base] = x4d(n, c, i, j);
-        }
+		// thread block size should be TILF_WIDTH * TILE_SIZE, and the data may be reload here,
+    for (i = h, ii = h0; i < h_base + X_tile_width; i += TILE_SIZE, ii += TILE_SIZE) {
+      for (j = w; j < w_base + X_tile_width; j += TILE_SIZE) {
+        X_shared[ii*X_tile_width+j-w_base] = x4d(n, c, i, j);
       }
-			__syncthreads();
-
-	    for (p = 0, pp = h0; p < K * K; p += K, pp += 1) {
-        for (q = 0; q < K; q++) {
-          // acc += x2d_shmem(w0+p, h0+q) * k2d_shmem(p, q);
-          acc += X_shared[pp*X_tile_width+w0+q] * K_shared[p+q];
-        }
-      }
-			__syncthreads();
-
     }
+		__syncthreads();
 
-		y4d(n, m, h, w) = acc;
+    for (p = 0, pp = h0; p < K * K; p += K, pp += 1) {
+      for (q = 0; q < K; q++) {
+        acc += X_shared[pp*X_tile_width+w0+q] * K_shared[p+q];
+      }
+    }
+		__syncthreads();
 
-// #undef k2d_shmem
-// #undef x2d_shmem
-    #undef y4d
-    #undef x4d
-    #undef k4d
+  }
+
+	y4d(n, m, h, w) = acc;
+
+  #undef y4d
+  #undef x4d
+  #undef k4d
 }
 
 
@@ -280,29 +275,29 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int W_unroll = C*K*K;
     const int H_unroll = H_out*W_out;
 
+    /* unroll optimization */
+    float* X_unrolled;
+    cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
 
-    // float* X_unrolled;
-    // cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
-    //
-    // #pragma unroll
-    // for (int b = 0; b < B; b++) {
-    //     float* x_dptr = &x.dptr_[b*C*H*W];
-    //     unroll(C, H, W, K, x_dptr, X_unrolled);
-    //     float* y_dptr = &y.dptr_[b*M*H_unroll];
-    //     gemm(w.dptr_, X_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
-    // }
-    // cudaFree(X_unrolled);
+    #pragma unroll
+    for (int b = 0; b < B; b++) {
+        float* x_dptr = &x.dptr_[b*C*H*W];
+        unroll(C, H, W, K, x_dptr, X_unrolled);
+        float* y_dptr = &y.dptr_[b*M*H_unroll];
+        gemm(w.dptr_, X_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
+    }
+    cudaFree(X_unrolled);
 
 
     /*  shared memory optimization */
-    const int H_grid = ceil((float)H_out / TILE_SIZE);
-    const int W_grid = ceil((float) W_out / TILE_SIZE);
-    const int Z =  H_grid * W_grid;
-
-    dim3 gridDim(B, M, Z);
-    dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
-    size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
-    forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
+    // const int H_grid = ceil((float)H_out / TILE_SIZE);
+    // const int W_grid = ceil((float) W_out / TILE_SIZE);
+    // const int Z =  H_grid * W_grid;
+    //
+    // dim3 gridDim(B, M, Z);
+    // dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
+    // size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
+    // forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
 
 /* reduction tree optimization, invocation prototype */
 /*
