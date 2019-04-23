@@ -49,8 +49,8 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
                     acc += x4d(b, c, h + p, w + q)*k4d(m, c, p, q);
                 }
             }
-            y4d(b, m, h, w) = acc;
         }
+        y4d(b, m, h, w) = acc;
     }
 
 #undef y4d
@@ -177,8 +177,8 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
           acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * K_shared[p*K + q];
         }
       }
-    }
-    if (h < H_out && w < W_out)
+  }
+  if (h < H_out && w < W_out)
 		y4d(n, m, h, w) = acc;
 
   #undef y4d
@@ -324,6 +324,8 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_unroll = H_out*W_out;
 
     /* unroll optimization */
+ 
+/*
     float* X_unrolled;
     cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
 
@@ -335,18 +337,21 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
         gemm(w.dptr_, X_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
     }
     cudaFree(X_unrolled);
+*/
 
+
+  const int H_grid = ceil((float)H_out / TILE_SIZE);
+  const int W_grid = ceil((float) W_out / TILE_SIZE);
+  const int Z =  H_grid * W_grid;
+ 
+  dim3 gridDim(B, M, Z);
+  dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
 
     /*  shared memory optimization */
-    // const int H_grid = ceil((float)H_out / TILE_SIZE);
-    // const int W_grid = ceil((float) W_out / TILE_SIZE);
-    // const int Z =  H_grid * W_grid;
-    //
-    // dim3 gridDim(B, M, Z);
-    // dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
-    // size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
-    // forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
-
+/*  
+  size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
+  forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
+*/
 
 /* reduction tree optimization, invocation prototype */
 /*
@@ -357,14 +362,13 @@ forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C
 */
 
 
-/* constant memory optimization */
-    // copy to contant memory
-/*
+    /* constant memory optimization */
+
     int TRUE_KERNEL_SIZE = K * K * M * C;
 
     cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
     forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
-*/
+
 
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
