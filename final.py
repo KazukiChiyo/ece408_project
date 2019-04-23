@@ -42,6 +42,8 @@ lenet_model = mx.mod.Module.load(
     prefix=MODEL_DIR + "/" + model_prefix, epoch=2, context=mx.gpu())
 lenet_model.bind(data_shapes=test_iter.provide_data,
                  label_shapes=test_iter.provide_label)
+print(test_iter.provide_data)
+mx.viz.print_summary(lenet_model._symbol)
 print "done"
 
 print "New Inference"

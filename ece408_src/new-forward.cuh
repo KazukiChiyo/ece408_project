@@ -159,8 +159,9 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 
   int c, i, ii, j, p, pp, q;
   for (c = 0; c < C; c++) {
-    if (h0 < K && w0 < K)
-        K_shared[h0*K+w0] = k4d(m, c, h0, w0);
+    if (h0 < K && w0 < K) {
+      K_shared[h0*K+w0] = k4d(m, c, h0, w0);
+    }
 		__syncthreads();
 
 		// thread block size should be TILF_WIDTH * TILE_SIZE, and the data may be reload here,
@@ -172,11 +173,11 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 		__syncthreads();
 
 	  for (p = 0; p < K; p++) {
-        for (q = 0; q < K; q++) {
-          // acc += x2d_shmem(w0+p, h0+q) * k2d_shmem(p, q);
-          acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * K_shared[p*K + q];
-        }
+      for (q = 0; q < K; q++) {
+        // acc += x2d_shmem(w0+p, h0+q) * k2d_shmem(p, q);
+        acc += X_shared[(h0 + p)*X_tile_width + w0 + q] * K_shared[p*K + q];
       }
+    }
   }
   if (h < H_out && w < W_out)
 		y4d(n, m, h, w) = acc;
@@ -188,7 +189,6 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 
 
 /* reduction tree  prototype */
-/*
 __global__ void forward_kernel_reduction_tree(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
 
@@ -261,7 +261,6 @@ __global__ void forward_kernel_reduction_tree(float *y, const float *x, const fl
 #undef k4d
 }
 
-*/
 
 /* constant memory optimization */
 __global__ void forward_kernel_consmem(float *y, const float *x, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
@@ -324,7 +323,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_unroll = H_out*W_out;
 
     /* unroll optimization */
- 
+
 /*
     float* X_unrolled;
     cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
@@ -343,15 +342,14 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
   const int H_grid = ceil((float)H_out / TILE_SIZE);
   const int W_grid = ceil((float) W_out / TILE_SIZE);
   const int Z =  H_grid * W_grid;
- 
+
   dim3 gridDim(B, M, Z);
   dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
 
-    /*  shared memory optimization */
-/*  
+  /*  shared memory optimization */
   size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
   forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
-*/
+
 
 /* reduction tree optimization, invocation prototype */
 /*
@@ -363,13 +361,9 @@ forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C
 
 
     /* constant memory optimization */
-
-    int TRUE_KERNEL_SIZE = K * K * M * C;
-
-    cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
-    forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
-
-
+    // int TRUE_KERNEL_SIZE = K * K * M * C;
+    // cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
+    // forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());

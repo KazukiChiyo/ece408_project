@@ -22,13 +22,13 @@ commands:
     # - /usr/bin/time python m2.1.py # execute code
     # - /usr/bin/time python m3.1.py 1000 # execute code
     # - nvprof python m3.1.py
-    
+
     # - /usr/bin/time python m4.1.py # execute code
-    # - nvprof -o timeline.nvprof python m4.1.py # 
-    # - nvprof -o timeline.nvprof python m4.1.py 100 # 
+    # - nvprof -o timeline.nvprof python m4.1.py #
+    # - nvprof -o timeline.nvprof python m4.1.py 100 #
 
   # MS4 optimizations
-    # - nvprof --kernels "forward_kernel_consmem" --analysis-metrics -o forward_kernel_consmem_analysis.nvprof python m4.1.py    
+    # - nvprof --kernels "forward_kernel_consmem" --analysis-metrics -o forward_kernel_consmem_analysis.nvprof python m4.1.py
     # - nvprof --kernels "forward_kernel_shmem" --analysis-metrics -o shmem_analysis.nvprof python m4.1.py
     # - nvprof --kernels "__gemm" --analysis-metrics -o gemm_analysis.nvprof python m4.1.py 100
     # - nvprof --kernels "__unroll" --analysis-metrics -o unroll_analysis.nvprof python m4.1.py 100
