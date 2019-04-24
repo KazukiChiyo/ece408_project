@@ -4,25 +4,37 @@
 
 #include <mxnet/base.h>
 
-#define TILE_SIZE_1 12
-#define TILE_SIZE_2 24
+// #define TILE_SIZE_1 12
+// #define TILE_SIZE_2 24
+#define TILE_SIZE_1 20
+#define TILE_SIZE_2 22
+
 #define CU_MAX_THREAD 1024
 
 /* kernel buffer elelment size */
-#define TOTAL_KERNEL_SIZE 5000
+// #define TOTAL_KERNEL_SIZE 5000
+#define FIRST_INPUT (1)
+#define FIRST_OUTPUT (6)
+#define SECOND_INPUT (6)
+#define SECOND_OUTPUT (16)
+#define KERNEL_WIDTH (5)
+#define TOTAL_KERNEL_SIZE_LARGE (SECOND_INPUT * SECOND_OUTPUT * KERNEL_WIDTH * KERNEL_WIDTH)
+#define TOTAL_KERNEL_SIZE_SMALL (FIRST_INPUT * FIRST_OUTPUT * KERNEL_WIDTH * KERNEL_WIDTH)
 
 namespace mxnet
 {
     namespace op
     {
-        __constant__ float cons_mem[TOTAL_KERNEL_SIZE];
+        // __constant__ float cons_mem[TOTAL_KERNEL_SIZE];
+				__constant__ float cons_mem_small[TOTAL_KERNEL_SIZE_SMALL];
+				__constant__ float cons_mem_large[TOTAL_KERNEL_SIZE_LARGE];
 
         /* shared memory */
         __global__ void __shmem_1(float *y, const float *x, const int H, const int W, const int M, const int C, const int K, const int B, const int W_grid) {
             #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
             #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
             #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-            #define k4d_constant(i3, i2, i1, i0) cons_mem[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+            #define k4d_constant(i3, i2, i1, i0) cons_mem_small[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
             const int H_out = H - K + 1;
             const int W_out = W - K + 1;
@@ -78,7 +90,7 @@ namespace mxnet
             #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
             #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
             #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-            #define k4d_constant(i3, i2, i1, i0) cons_mem[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+            #define k4d_constant(i3, i2, i1, i0) cons_mem_large[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
             const int H_out = H - K + 1;
             const int W_out = W - K + 1;
@@ -146,7 +158,8 @@ namespace mxnet
             const int H_out = H - K + 1;
             const int W_out = W - K + 1;
 
-            if (M == 12) {
+            if (M == FIRST_OUTPUT) 
+						{
                 const int H_grid = ceil((float)H_out / TILE_SIZE_1);
                 const int W_grid = ceil((float) W_out / TILE_SIZE_1);
                 const int Z =  H_grid * W_grid;
@@ -155,11 +168,12 @@ namespace mxnet
                 dim3 blockDim(TILE_SIZE_1, TILE_SIZE_1, 1);
 
                 size_t shmem_size = sizeof(float)  * ((TILE_SIZE_1 + K - 1) * (TILE_SIZE_1 + K -1) + K * K);
-                int kernel_size = C*M*K*K;
-                cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float)*kernel_size);
+                int kernel_size = TOTAL_KERNEL_SIZE_SMALL;
+                cudaMemcpyToSymbol(cons_mem_small, w.dptr_, sizeof(float)*kernel_size);
                 __shmem_1<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, H, W, M, C, K, B, W_grid);
             }
-            else {
+						if (M == SECOND_OUTPUT)            
+						{
                 const int H_grid = ceil((float)H_out / TILE_SIZE_2);
                 const int W_grid = ceil((float) W_out / TILE_SIZE_2);
                 const int Z =  H_grid * W_grid;
@@ -168,8 +182,8 @@ namespace mxnet
                 dim3 blockDim(TILE_SIZE_2, TILE_SIZE_2, 1);
 
                 size_t shmem_size = sizeof(float)  * ((TILE_SIZE_2 + K - 1) * (TILE_SIZE_2 + K -1) + K * K);
-                int kernel_size = C*M*K*K;
-                cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float)*kernel_size);
+                int kernel_size =TOTAL_KERNEL_SIZE_LARGE;
+                cudaMemcpyToSymbol(cons_mem_large, w.dptr_, sizeof(float)*kernel_size);
                 __shmem_2<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, H, W, M, C, K, B, W_grid);
             }
 
