@@ -3,6 +3,7 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
+#include <assert.h>
 
 #define TILE_SIZE 16
 #define CU_MAX_THREAD 1024
@@ -13,22 +14,31 @@
 #define FAKE_C (20)
 #define TOTAL_KERNEL_SIZE (FAKE_M * FAKE_K * FAKE_K * FAKE_C)
 
+/* kernel size optimizaiton */
+/* two layered network, first layer filter 5 * 5 * 6, second layer filter 5 * 5 * 16 */
+#define TILE_SIZE_SMALL 22
+#define TILE_SIZE_LARGE 20
+#define FIRST_INPUT (1)
+#define FIRST_OUTPUT (6)
+#define SECOND_INPUT (6)
+#define SECOND_OUTPUT (16)
+#define KERNEL_WIDTH (5)
+#define TOTAL_KERNEL_SIZE_LARGE (SECOND_INPUT * SECOND_OUTPUT * KERNEL_WIDTH * KERNEL_WIDTH)
+#define TOTAL_KERNEL_SIZE_SMALL (FIRST_INPUT * FIRST_OUTPUT * KERNEL_WIDTH * KERNEL_WIDTH)
+
 namespace mxnet
 {
 namespace op
 {
 
-__constant__ float cons_mem[TOTAL_KERNEL_SIZE];
+/* kernel size opt*/ 
+__constant__ float cons_mem_small[TOTAL_KERNEL_SIZE_SMALL];
+__constant__ float cons_mem_large[TOTAL_KERNEL_SIZE_LARGE];
+// __constant__ float cons_mem[TOTAL_KERNEL_SIZE];
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
 
-    /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    */
     int b, m, h, w, c, p, q;
     b = blockIdx.x;
     m = blockIdx.y;
@@ -337,18 +347,11 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 // #undef k4d
 // }
 
-*/
+
 
 /* constant memory optimization */
 __global__ void forward_kernel_consmem(float *y, const float *x, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
 {
-
-    /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    */
     int b, m, h, w, c, p, q;
     b = blockIdx.x;
     m = blockIdx.y;
@@ -366,7 +369,7 @@ __global__ void forward_kernel_consmem(float *y, const float *x, const int B, co
         for (c = 0; c < C; ++c) {
             for (p = 0; p < K; ++p) {
                 for (q = 0; q < K; ++q) {
-                    acc += x4d(b, c, h + p, w + q) * k4d_constant(m, c, p, q);
+                  // acc += x4d(b, c, h + p, w + q) * k4d_constant(m, c, p, q);
                 }
             }
         }
@@ -378,7 +381,66 @@ __global__ void forward_kernel_consmem(float *y, const float *x, const int B, co
 #undef k4d_constant
 }
 
+#define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+#define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+#define k4d_constant_large(i3, i2, i1, i0) cons_mem_large[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+#define k4d_constant_small(i3, i2, i1, i0) cons_mem_small[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+/* different kernel implementation(parameters) */
+__global__ void forward_kernel_consmem_large(float *y, const float *x, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
+{
+    /*
+    Modify this function to implement the forward pass described in Chapter 16.
+    We have added an additional dimension to the tensors to support an entire mini-batch
+    The goal here is to be correct AND fast.
+    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
+    */
+    int b, m, h, w, c, p, q;
+    b = blockIdx.x;
+    m = blockIdx.y;
+    h = blockIdx.z/W_grid*TILE_SIZE_LARGE + threadIdx.y;
+    w = blockIdx.z%W_grid*TILE_SIZE_LARGE + threadIdx.x;
+    float acc = 0.0f;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
 
+    if (h < H_out && w < W_out) {
+        for (c = 0; c < C; ++c) {
+            for (p = 0; p < K; ++p) {
+                for (q = 0; q < K; ++q) { 
+                  acc += x4d(b, c, h + p, w + q) * k4d_constant_large(m, c, p, q);
+                }
+            }
+        }
+        y4d(b, m, h, w) = acc;
+    }
+
+}
+__global__ void forward_kernel_consmem_small(float *y, const float *x, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
+{
+    int b, m, h, w, c, p, q;
+    b = blockIdx.x;
+    m = blockIdx.y;
+    h = blockIdx.z/W_grid*TILE_SIZE_SMALL + threadIdx.y;
+    w = blockIdx.z%W_grid*TILE_SIZE_SMALL + threadIdx.x;
+    float acc = 0.0f;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    if (h < H_out && w < W_out) {
+        for (c = 0; c < C; ++c) {
+            for (p = 0; p < K; ++p) {
+                for (q = 0; q < K; ++q) { 
+                  acc += x4d(b, c, h + p, w + q) * k4d_constant_small(m, c, p, q);
+                }
+            }
+        }
+        y4d(b, m, h, w) = acc;
+    }
+
+}
+#undef y4d
+#undef x4d
+#undef k4d_constant_large
+#undef k4d_constant_small
 
 /*
    This function is called by new-inl.h
@@ -415,17 +477,20 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     cudaFree(X_unrolled);
 */
 
-
+	/*
   const int H_grid = ceil((float)H_out / TILE_SIZE);
   const int W_grid = ceil((float) W_out / TILE_SIZE);
   const int Z =  H_grid * W_grid;
 
   dim3 gridDim(B, M, Z);
   dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
+	*/
 
   /*  shared memory optimization */
-  size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
+	/*  
+	size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
   forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
+	*/
 
 /* reduction tree optimization, invocation prototype */
   // float *lists;
@@ -446,15 +511,36 @@ forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C
     // cudaMemcpyToSymbol(cons_mem, w.dptr_, sizeof(float) * TRUE_KERNEL_SIZE);
     // forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
 
+		/* two kernel implementation */
+		size_t ksize = 0;
+		size_t tile_size = 0;
+		if(M == SECOND_OUTPUT) tile_size = TILE_SIZE_LARGE;
+		else tile_size = TILE_SIZE_SMALL;
+
+		const int H_grid = ceil((float)H_out / tile_size);
+		const int W_grid = ceil((float) W_out / tile_size);
+		const int Z =  H_grid * W_grid;
+		dim3 gridDim(B, M, Z);
+		dim3 blockDim(tile_size, tile_size, 1);
+
+    if(M == SECOND_OUTPUT)
+    {
+      ksize = TOTAL_KERNEL_SIZE_LARGE * sizeof(float);
+      cudaMemcpyToSymbol(cons_mem_large, w.dptr_, ksize);
+      forward_kernel_consmem_large<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
+    }
+    if(M == FIRST_OUTPUT)
+    { 
+      assert(M == FIRST_OUTPUT);
+      ksize = TOTAL_KERNEL_SIZE_SMALL * sizeof(float);
+      cudaMemcpyToSymbol(cons_mem_small, w.dptr_, ksize);
+      forward_kernel_consmem_small<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
+    }
+
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 
 }
-
-
-
-
-
 
 /*
     This tells mxnet how to do an op when it's not a float.
