@@ -24,7 +24,7 @@ commands:
     # - nvprof python m3.1.py
 
     # - /usr/bin/time python m4.1.py # execute code
-    # - nvprof -o timeline.nvprof python m4.1.py #
+    - nvprof -o timeline.nvprof python m4.1.py #
     # - nvprof -o timeline.nvprof python m4.1.py 100 #
 
   # MS4 optimizations
@@ -35,4 +35,4 @@ commands:
     #
 
     # final submission
-    - /usr/bin/time python final.py # ranking test
+    # - /usr/bin/time python final.py # ranking test
