@@ -442,7 +442,7 @@ __global__ void forward_kernel_fusion_kernel(int CHAN, int HEIGHT, int WIDTH, in
   // thread is in charge of enmm
   __shared__ float subtileM[TILE_SIZE][TILE_SIZE]; // M for X shared 
   __shared__ float subtileN[TILE_SIZE][TILE_SIZE]; // N for W shared
-  int tx, ty, bx, by, Row, Col, H_out, W_out, H_unroll, W_unroll, bz;
+  int tx, ty, bx, by, Row, Col, H_out, W_out, H_unroll, W_unroll, K_unroll, bz;
   tx = threadIdx.x;
   ty = threadIdx.y;
   bx = blockIdx.x;
@@ -457,7 +457,8 @@ __global__ void forward_kernel_fusion_kernel(int CHAN, int HEIGHT, int WIDTH, in
   Y += output_start; // shift away
 
   W_unroll = H_out * W_out;
-  H_unroll = CHAN * KERNEL_SIZE * KERNEL_SIZE;
+  K_unroll = KERNEL_SIZE * KERNEL_SIZE;
+  H_unroll = CHAN * K_unroll;
   Row = by * TILE_SIZE + ty;
   Col = bx * TILE_SIZE + tx;
   float PV = 0.0f;
@@ -466,19 +467,30 @@ __global__ void forward_kernel_fusion_kernel(int CHAN, int HEIGHT, int WIDTH, in
   for (int itr = 0; itr < ceil( (float) A_col / TILE_SIZE); ++itr)
   {
     // coalesc load data
-    int itr_base = itr * TILE_SIZE; 
+    int itr_base = itr * TILE_SIZE;
+    // C, H, W,   Col, itr_base + ty
+    // Col / W_out = height, Col % W = width, C = itr_base + ty / K_unroll 
+    // C * H_in * W_in  + height * W_in + weight 
+    int height = Col/W_out;
+    int width = Col%W_out;
+    int chan = (itr_base + ty) / K_unroll;
+    int k_index = (itr_base + ty) % K_unroll;
     if (itr_base + ty < B_row && Col < B_col) 
     {
       // w = itr_base + tx, h = row
-      subtileM[ty][tx] = X[Col +  W_unroll * (itr_base + ty)];
+      // subtileM[ty][tx] = X[Col +  W_unroll * (itr_base + ty)];
+      subtileM[ty][tx] = X[chan * HEIGHT * WIDTH + height * WIDTH + width];
     }else 
       subtileM[ty][tx] = 0.0f;
+    
 
     // load weight 
     if (Row < A_row && itr_base + tx < A_col) 
     {
-      // w = itr_base + tx, h = ty 
-      subtileN[ty][tx] = W[Row * H_unroll + itr_base + tx];
+      // w = itr_base + tx, h = ty | M C K K 
+      // Row, chan, k_index
+      //subtileN[ty][tx] = W[Row * H_unroll + itr_base + tx];
+      subtileN[ty][tx] = W[Row * CHAN * K_unroll + chan * K_unroll + k_index];
     }else 
       subtileN[ty][tx] = 0.0f;
     __syncthreads();
