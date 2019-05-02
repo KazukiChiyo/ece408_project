@@ -452,18 +452,18 @@ __global__ void forward_kernel_fusion_kernel(int CHAN, int HEIGHT, int WIDTH, in
   H_out = HEIGHT - (KERNEL_SIZE - 1);
   W_out = WIDTH - (KERNEL_SIZE - 1);
   int input_start = bz * (CHAN * HEIGHT * WIDTH);
-  int output_start = bz * (B * M * H_out * W_out);
+  int output_start = bz * ( M * H_out * W_out);
   X += input_start;
   Y += output_start; // shift away
 
   W_unroll = H_out * W_out;
   H_unroll = CHAN * KERNEL_SIZE * KERNEL_SIZE;
-  Row = by * TILE_WIDTH + ty;
-  Col = bx * TILE_WIDTH + tx;
+  Row = by * TILE_SIZE + ty;
+  Col = bx * TILE_SIZE + tx;
   float PV = 0.0f;
     
   // iterate through the TILE, along the A_col
-  while (int itr = 0; itr < ceil((float) A_col / TILE_SIZE); ++itr)
+  for (int itr = 0; itr < ceil( (float) A_col / TILE_SIZE); ++itr)
   {
     // coalesc load data
     int itr_base = itr * TILE_SIZE; 
@@ -485,7 +485,7 @@ __global__ void forward_kernel_fusion_kernel(int CHAN, int HEIGHT, int WIDTH, in
     // calculate
     for (int k = 0; k < TILE_SIZE; ++k)
     {
-      PV += subtileM[ty][k] * subtileN[k][tx];
+      PV += subtileM[k][tx] * subtileN[ty][k];
     }
     __syncthreads();
 
@@ -514,8 +514,8 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int K = w.shape_[3]; // kernel_size
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-    const int W_unroll = C*K*K;
-    const int H_unroll = H_out*W_out;
+    const int H_unroll = C*K*K;
+    const int W_unroll = H_out*W_out;
 
     /* unroll optimization */
     // float* X_unrolled;
