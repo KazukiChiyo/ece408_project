@@ -25,7 +25,7 @@
 #define KERNEL_WIDTH (5)
 #define TOTAL_KERNEL_SIZE_LARGE (SECOND_INPUT * SECOND_OUTPUT * KERNEL_WIDTH * KERNEL_WIDTH)
 #define TOTAL_KERNEL_SIZE_SMALL (FIRST_INPUT * FIRST_OUTPUT * KERNEL_WIDTH * KERNEL_WIDTH)
-
+#define KERNEL_SIZE (5)
 namespace mxnet
 {
 namespace op
@@ -118,7 +118,7 @@ __global__ void __unroll(int C, int H, int W, int K, float* X, float* X_unroll) 
     }
 }
 
-
+// gemm(w.dptr, x_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, W_unroll, W_unroll, H_unroll, M, H_unroll
 void gemm(float* A, float* B, float* C, int numARows, int numAColumns, int numBRows, int numBColumns, int numCRows, int numCColumns) {
     dim3 dimGrid(ceil((float) numCColumns/TILE_SIZE), ceil((float) numCRows/TILE_SIZE), 1);
     dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1);
@@ -432,6 +432,72 @@ __global__ void forward_kernel_consmem_small(float *y, const float *x, const int
 #undef k4d_constant_large
 #undef k4d_constant_small
 
+
+// 25 | 44 *44 | 18 * 18 
+// TILE_SIZE = 25 
+// kernel fusion in gemm and unroll
+__global__ void forward_kernel_fusion_kernel(int CHAN, int HEIGHT, int WIDTH, int M, float * W, float * X, float * Y, int A_row, int A_col, int B_row, int B_col, int C_row, int C_col)
+{
+  // block description: 
+  // thread is in charge of enmm
+  __shared__ float subtileM[TILE_SIZE][TILE_SIZE]; // M for X shared 
+  __shared__ float subtileN[TILE_SIZE][TILE_SIZE]; // N for W shared
+  int tx, ty, bx, by, Row, Col, H_out, W_out, H_unroll, W_unroll, bz;
+  tx = threadIdx.x;
+  ty = threadIdx.y;
+  bx = blockIdx.x;
+  by = blockIdx.y;
+  bz = blockIdx.z; 
+  // c, s 
+  H_out = HEIGHT - (KERNEL_SIZE - 1);
+  W_out = WIDTH - (KERNEL_SIZE - 1);
+  int input_start = bz * (CHAN * HEIGHT * WIDTH);
+  int output_start = bz * (B * M * H_out * W_out);
+  X += input_start;
+  Y += output_start; // shift away
+
+  W_unroll = H_out * W_out;
+  H_unroll = CHAN * KERNEL_SIZE * KERNEL_SIZE;
+  Row = by * TILE_WIDTH + ty;
+  Col = bx * TILE_WIDTH + tx;
+  float PV = 0.0f;
+    
+  // iterate through the TILE, along the A_col
+  while (int itr = 0; itr < ceil((float) A_col / TILE_SIZE); ++itr)
+  {
+    // coalesc load data
+    int itr_base = itr * TILE_SIZE; 
+    if (itr_base + ty < B_row && Col < B_col) 
+    {
+      // w = itr_base + tx, h = row
+      subtileM[ty][tx] = X[Col +  W_unroll * (itr_base + ty)];
+    }else 
+      subtileM[ty][tx] = 0.0f;
+
+    // load weight 
+    if (Row < A_row && itr_base + tx < A_col) 
+    {
+      // w = itr_base + tx, h = ty 
+      subtileN[ty][tx] = W[Row * H_unroll + itr_base + tx];
+    }else 
+      subtileN[ty][tx] = 0.0f;
+    __syncthreads();
+    // calculate
+    for (int k = 0; k < TILE_SIZE; ++k)
+    {
+      PV += subtileM[ty][k] * subtileN[k][tx];
+    }
+    __syncthreads();
+
+  }
+  if (Row < C_row && Col < C_col) 
+    Y[Row * C_col + Col] = PV;
+}
+
+
+
+
+
 /*
    This function is called by new-inl.h
    Any code you write should be executed by this function.
@@ -464,6 +530,13 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // }
     // cudaFree(X_unrolled);
 
+// invocation
+  int M_ceil = ceil((float) M / TILE_SIZE);
+
+  dim3 gridDim(M_ceil, ceil((float) W_unroll / TILE_SIZE), B);
+  dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
+  forward_kernel_fusion_kernel<<<gridDim, blockDim>>>(C, H, W, M, w.dptr_, x.dptr_, y.dptr_, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
+    /*
   const int H_grid = ceil((float)H_out / TILE_SIZE);
   const int W_grid = ceil((float) W_out / TILE_SIZE);
   const int Z =  H_grid * W_grid;
@@ -471,10 +544,10 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
   dim3 gridDim(B, M, Z);
   dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
 
-  /* reduction tree optimization */
+  reduction tree optimization
   size_t shmem_size = C * TILE_SIZE * TILE_SIZE * sizeof(float);
   forward_kernel_reduction_tree<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K, W_grid);
-
+*/
   /*  shared memory optimization */
 	// size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
   // forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
