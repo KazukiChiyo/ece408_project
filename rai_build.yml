@@ -32,13 +32,12 @@ commands:
     # - nvprof --kernels "forward_kernel_shmem" --analysis-metrics -o shmem_analysis.nvprof python m4.1.py
     # - nvprof --kernels "__gemm" --analysis-metrics -o gemm_analysis.nvprof python m4.1.py 100
     # - nvprof --kernels "__unroll" --analysis-metrics -o unroll_analysis.nvprof python m4.1.py 100
-    
+
 
   # MS5 optimizations
-    # - nvprof -o timeline.nvprof python final.py #
-    # - nvprof --kernels "forward_kernel_consmem_large" --analysis-metrics -o multiple_impl_kernel_analysis.nvprof python final.py
+    - nvprof -o timeline.nvprof python final.py #
+    - nvprof --kernels "forward_kernel_reduction_tree" --analysis-metrics -o reduction_tree_analysis.nvprof python final.py
     # - nvprof --kernels "forward_kernel_consmem_small" --analysis-metrics -o multiple_impl_kernel_analysis.nvprof python final.py
 
     # final submission
-    - /usr/bin/time python final.py # ranking test
-
+    # - /usr/bin/time python final.py # ranking test

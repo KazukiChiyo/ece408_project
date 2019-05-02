@@ -31,7 +31,7 @@ namespace mxnet
 namespace op
 {
 
-/* kernel size opt*/ 
+/* kernel size opt*/
 __constant__ float cons_mem_small[TOTAL_KERNEL_SIZE_SMALL];
 __constant__ float cons_mem_large[TOTAL_KERNEL_SIZE_LARGE];
 // __constant__ float cons_mem[TOTAL_KERNEL_SIZE];
@@ -164,7 +164,7 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 
   float acc = 0.0f;
 
-  int c, i, ii, j, p, pp, q;
+  int c, i, ii, j, p, q;
   for (c = 0; c < C; c++) {
     if (h0 < K && w0 < K)
         K_shared[h0*K+w0] = k4d(m, c, h0, w0);
@@ -275,77 +275,67 @@ __global__ void forward_kernel_shmem(float *y, const float *x, const float *k,  
 //       partialSum[t] += partialSum[t + stride];
 //   }
 
-// __global__ void forward_kernel_reduction_tree(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
-// {
-//
-//     int b, m, h, w, c, p, q, tx, h_base, w_base;
-//     b = blockIdx.x;
-//     m = blockIdx.y;
-//     h_base = blockIdx.z/W_grid*TILE_SIZE;
-//     w_base = blockIdx.z%W_grid*TILE_SIZE;
-//
-//     float acc = 0.0f;
-//     const int H_out = H - K + 1;
-//     const int W_out = W - K + 1;
-//         tx = threadIdx.x;
-//
-// #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-// #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-// #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-// #define shmem(i2, i1, i0) ... // TODO
-//
-//         extern __shared__ float shmem[]; // shmem[C][TILE_SIZE][TILE_SIZE]; // temp declaration
-//         int stride = blockDim.x / 2;
-//
-//         for (int dh = 0; dh < TILE_SIZE; ++dh)
-//         {
-//             for (int dw = 0; dw < TILE_SIZE; ++dw)
-//             {
-//                 if (h_base + dh < H_out && w_base + dw < W_out)
-//                 {
-//                     float acc = 0.0f;
-//           for (p = 0; p < K; ++p) {
-//             for (q = 0; q < K; ++q) {
-//               acc += x4d(b, c, h + p, w + q)*k4d(m, tx, p, q);
-//             }
-//           }
-//           shmem[tx, h, w] = acc;
-//                 }
-//             }
-//         }
-//
-//         for (int std = stride/2; std > 0; std /= 2)
-//         {
-//             if (tx < std)
-//             {
-//                 float sum = 0.0f;
-//                 for (int p = 0; p < TILE_SIZE; ++p)
-//                 {
-//                     for (int q = 0; q < TILE_SIZE; ++q)
-//                     {
-//                         shmem[tx, p, q] += shmem[tx+std, p, q];  // TODO shmem macro taking 3 inputs
-//                     }
-//                 }
-//             }
-//             __syncthreads();
-//
-//         }
-//
-//     if (tx == 0) {
-//             for (int ho = 0; ho < TILE_SIZE; ++ho)
-//             {
-//                 for (int wo = 0; wo < TILE_SIZE; ++wo)
-//                 {
-//     			y4d(b, w, ho + h_base, wo + w_base) = shmem[tx, ho + h_base, wo + w_base];
-//                 }
-//             }
-//     }
-//
-// #undef shmem
-// #undef y4d
-// #undef x4d
-// #undef k4d
-// }
+__global__ void forward_kernel_reduction_tree(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K, const int W_grid)
+{
+    extern __shared__ float shmem[];  // C * TILE_SIZE * TILE_SIZE
+
+    int b, m, h, w, c, p, q, tx, ty, h_base, w_base;
+    tx = threadIdx.x;
+    ty = threadIdx.y;
+    b = blockIdx.x;
+    m = blockIdx.y;
+    h_base = blockIdx.z/W_grid*TILE_SIZE;
+    w_base = blockIdx.z%W_grid*TILE_SIZE;
+    h  = h_base + ty;
+    w  = w_base + tx;
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+
+    #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+    #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+    #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    #define sm(i2, i1, i0) shmem[(i2) * (TILE_SIZE * TILE_SIZE) + (i1) * (TILE_SIZE) + i0]
+
+    for (c = 0; c < C; c++)
+      sm(c, ty, tx) = 0;
+    __syncthreads();
+
+    if (h < H_out && w < W_out) {
+      for (c = 0; c < C; c++) {
+        float acc = 0.0f;
+        for (p = 0; p < K; p++) {
+          for (q = 0; q < K; q++) {
+            acc += x4d(b, c, h + p, w + q) * k4d(m, c, p, q);
+          }
+        }
+        sm(c, ty, tx) = acc;
+      }
+    }
+
+    __syncthreads();
+    int stride;
+    if (C == 1) stride = 0;
+    else stride = 4;
+
+    for (; stride > 0; stride /= 2) {
+      __syncthreads();
+      if (ty < stride && ty+stride < C) {
+        for (int i = 0; i < TILE_SIZE; i ++) {
+          sm(ty, tx, i) += sm(ty+stride, tx, i);
+        }
+      }
+    }
+
+    __syncthreads();
+
+    if (h < H_out && w < W_out)
+      y4d(b, m, h, w) = sm(0, ty, tx);
+
+    #undef sm
+    #undef y4d
+    #undef x4d
+    #undef k4d
+}
 
 
 
@@ -406,7 +396,7 @@ __global__ void forward_kernel_consmem_large(float *y, const float *x, const int
     if (h < H_out && w < W_out) {
         for (c = 0; c < C; ++c) {
             for (p = 0; p < K; ++p) {
-                for (q = 0; q < K; ++q) { 
+                for (q = 0; q < K; ++q) {
                   acc += x4d(b, c, h + p, w + q) * k4d_constant_large(m, c, p, q);
                 }
             }
@@ -428,7 +418,7 @@ __global__ void forward_kernel_consmem_small(float *y, const float *x, const int
     if (h < H_out && w < W_out) {
         for (c = 0; c < C; ++c) {
             for (p = 0; p < K; ++p) {
-                for (q = 0; q < K; ++q) { 
+                for (q = 0; q < K; ++q) {
                   acc += x4d(b, c, h + p, w + q) * k4d_constant_small(m, c, p, q);
                 }
             }
@@ -462,40 +452,37 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_unroll = H_out*W_out;
 
     /* unroll optimization */
+    // float* X_unrolled;
+    // cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
+    //
+    // #pragma unroll
+    // for (int b = 0; b < B; b++) {
+    //     float* x_dptr = &x.dptr_[b*C*H*W];
+    //     unroll(C, H, W, K, x_dptr, X_unrolled);
+    //     float* y_dptr = &y.dptr_[b*M*H_unroll];
+    //     gemm(w.dptr_, X_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
+    // }
+    // cudaFree(X_unrolled);
 
-/*
-    float* X_unrolled;
-    cudaMalloc(&X_unrolled, W_unroll*H_unroll*sizeof(float));
-
-    #pragma unroll
-    for (int b = 0; b < B; b++) {
-        float* x_dptr = &x.dptr_[b*C*H*W];
-        unroll(C, H, W, K, x_dptr, X_unrolled);
-        float* y_dptr = &y.dptr_[b*M*H_unroll];
-        gemm(w.dptr_, X_unrolled, y_dptr, M, W_unroll, W_unroll, H_unroll, M, H_unroll);
-    }
-    cudaFree(X_unrolled);
-*/
-
-	/*
   const int H_grid = ceil((float)H_out / TILE_SIZE);
   const int W_grid = ceil((float) W_out / TILE_SIZE);
   const int Z =  H_grid * W_grid;
 
   dim3 gridDim(B, M, Z);
   dim3 blockDim(TILE_SIZE, TILE_SIZE, 1);
-	*/
+
+  /* reduction tree optimization */
+  size_t shmem_size = C * TILE_SIZE * TILE_SIZE * sizeof(float);
+  forward_kernel_reduction_tree<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K, W_grid);
 
   /*  shared memory optimization */
-	/*  
-	size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
-  forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
-	*/
+	// size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
+  // forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid);
 
 /* reduction tree optimization, invocation prototype */
   // float *lists;
   // cudaMalloc((void **)&lists, C * M * H_grid * W_grid * sizeof(float));
-  // size_t shmem_size = sizeof(float)  * ((TILE_SIZE + K - 1) * (TILE_SIZE + K -1 ) + K * K);
+  // size_t shmem_size = sizeof(float) * ((TILE_SIZE + K - 1) * (TILE_SIZE + K - 1) + K * K);
   // forward_kernel_shmem<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, H, W, M, C, K, W_grid, lists);
 
 /*
@@ -512,30 +499,30 @@ forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C
     // forward_kernel_consmem<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
 
 		/* two kernel implementation */
-		size_t ksize = 0;
-		size_t tile_size = 0;
-		if(M == SECOND_OUTPUT) tile_size = TILE_SIZE_LARGE;
-		else tile_size = TILE_SIZE_SMALL;
-
-		const int H_grid = ceil((float)H_out / tile_size);
-		const int W_grid = ceil((float) W_out / tile_size);
-		const int Z =  H_grid * W_grid;
-		dim3 gridDim(B, M, Z);
-		dim3 blockDim(tile_size, tile_size, 1);
-
-    if(M == SECOND_OUTPUT)
-    {
-      ksize = TOTAL_KERNEL_SIZE_LARGE * sizeof(float);
-      cudaMemcpyToSymbol(cons_mem_large, w.dptr_, ksize);
-      forward_kernel_consmem_large<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
-    }
-    if(M == FIRST_OUTPUT)
-    { 
-      assert(M == FIRST_OUTPUT);
-      ksize = TOTAL_KERNEL_SIZE_SMALL * sizeof(float);
-      cudaMemcpyToSymbol(cons_mem_small, w.dptr_, ksize);
-      forward_kernel_consmem_small<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
-    }
+		// size_t ksize = 0;
+		// size_t tile_size = 0;
+		// if(M == SECOND_OUTPUT) tile_size = TILE_SIZE_LARGE;
+		// else tile_size = TILE_SIZE_SMALL;
+    //
+		// const int H_grid = ceil((float)H_out / tile_size);
+		// const int W_grid = ceil((float) W_out / tile_size);
+		// const int Z =  H_grid * W_grid;
+		// dim3 gridDim(B, M, Z);
+		// dim3 blockDim(tile_size, tile_size, 1);
+    //
+    // if(M == SECOND_OUTPUT)
+    // {
+    //   ksize = TOTAL_KERNEL_SIZE_LARGE * sizeof(float);
+    //   cudaMemcpyToSymbol(cons_mem_large, w.dptr_, ksize);
+    //   forward_kernel_consmem_large<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
+    // }
+    // if(M == FIRST_OUTPUT)
+    // {
+    //   assert(M == FIRST_OUTPUT);
+    //   ksize = TOTAL_KERNEL_SIZE_SMALL * sizeof(float);
+    //   cudaMemcpyToSymbol(cons_mem_small, w.dptr_, ksize);
+    //   forward_kernel_consmem_small<<<gridDim, blockDim>>>(y.dptr_, x.dptr_, B, M, C, H, W, K, W_grid);
+    // }
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
